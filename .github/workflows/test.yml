@@ -1,0 +1,40 @@
+name: Test time-zone patch
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-registry-tests:
+    name: Windows / ${{ matrix.shell }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell sources
+        shell: ${{ matrix.shell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($path in @('Patch-BcTimeZone.ps1','Test-BcTimeZonePatch.ps1')) {
+            $errors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $path), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: Run isolated registry tests
+        shell: ${{ matrix.shell }}
+        run: .\Test-BcTimeZonePatch.ps1
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.shell }}
+          path: test-results.json
+          if-no-files-found: ignore

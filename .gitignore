@@ -1,0 +1,8 @@
+# Generated verification results and machine-specific backups
+test-results.json
+test-backups/
+artifacts/
+*.zip
+*.log
+.idea/
+.vscode/

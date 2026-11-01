@@ -1,0 +1,29 @@
+﻿{
+    "ExtractedAtUtc":  "2026-11-01T15:34:37.9192976Z",
+    "Source":  "Existing staged Microsoft Windows component store, read only",
+    "KB":  "KB5126657",
+    "ComponentVersion":  "10.0.19041.7802",
+    "PackageVersion":  "19041.7807.1.49",
+    "SourceHashes":  [
+                         {
+                             "FileName":  "amd64_microsoft-windows-i..rnational-timezones_31bf3856ad364e35_10.0.19041.7802_none_89c6af3bbef8ff0e.manifest",
+                             "SHA256":  "69559431B516526D3588DCCABC5315A81377CD71009FF26CA5CB230E252F1131"
+                         },
+                         {
+                             "FileName":  "Package_for_RollupFix~31bf3856ad364e35~amd64~~19041.7807.1.49.mum",
+                             "SHA256":  "432A8EAE90A753592C7D175C27AD720F53500558FDC5F7E7857F6ACC40B0E584"
+                         },
+                         {
+                             "FileName":  "tzres.dll.mui",
+                             "SHA256":  "EC6B8DD6E461318085B89E394E18ACDBF7D08EC2FC009341FC02985A427C5EF3"
+                         }
+                     ],
+    "PackageMumSignature":  "Valid",
+    "EnglishResourceStrings":  {
+                                   "3402":  "British Columbia Standard Time",
+                                   "3401":  "British Columbia Daylight Time",
+                                   "3400":  "(UTC-07:00) Pacific Time (British Columbia)"
+                               },
+    "Adaptation":  "Exact Microsoft TZI and Dynamic DST bytes. MUI resource references replaced by their resolved English Display, Dlt and Std strings; no system DLL replacement.",
+    "SupportUrl":  "https://support.microsoft.com/en-us/servicing/os/windows-10/2026/10/kb5126657-windows-10-21h2-22h2-security-update"
+}
