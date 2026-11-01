@@ -1,9 +1,12 @@
-﻿{
+{
     "Id":  "British Columbia Standard Time",
     "Values":  {
                    "Display":  "(UTC-07:00) Pacific Time (British Columbia)",
                    "Dlt":  "British Columbia Daylight Time",
                    "Std":  "British Columbia Standard Time",
+                   "MUI_Display":  "(UTC-07:00) Pacific Time (British Columbia)",
+                   "MUI_Dlt":  "British Columbia Daylight Time",
+                   "MUI_Std":  "British Columbia Standard Time",
                    "TZI":  "A401000000000000C4FFFFFF0000000000000000000000000000000000000000000000000000000000000000"
                },
     "Dynamic":  {

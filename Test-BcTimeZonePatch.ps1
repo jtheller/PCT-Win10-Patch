@@ -15,6 +15,7 @@ $initialBc = $machine.OpenSubKey($zonePath)
 $initialBcFingerprint = $null
 if ($initialBc) { try {$initialBcFingerprint=Get-BcFingerprint $initialBc} finally {$initialBc.Dispose()} }
 $legacy = [TimeZoneInfo]::FindSystemTimeZoneById('Pacific Standard Time')
+Initialize-BcNativeApi
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -45,8 +46,8 @@ try {
             if ($node.keyName -match 'Dynamic DST') { $target=$key.OpenSubKey('Dynamic DST') }
             try {
                 foreach ($value in $node.registryValue) {
-                    if ($value.name -like 'MUI_*') { continue }
-                    if ($value.valueType -eq 'REG_BINARY') { $actual=[BitConverter]::ToString($target.GetValue($value.name)).Replace('-',''); $expected=$value.value }
+                    if ($value.name -like 'MUI_*') { $actual=$target.GetValue($value.name); $expected=$definition.Values.($value.name.Substring(4)) }
+                    elseif ($value.valueType -eq 'REG_BINARY') { $actual=[BitConverter]::ToString($target.GetValue($value.name)).Replace('-',''); $expected=$value.value }
                     else { $actual=[int]$target.GetValue($value.name); $expected=[Convert]::ToInt32($value.value.Substring(2),16) }
                     if ($actual -ne $expected) { throw "Extracted value mismatch: $($value.name)" }
                     $checks++
@@ -64,6 +65,31 @@ try {
     # Redirect HKLM only inside this process. No machine registry data is written.
     [BcTestRegistry]::Override($sandbox.Handle.DangerousGetHandle())
     $overridden=$true
+    # Each unique ID avoids the native per-process cache. Missing either name
+    # must reproduce ERROR_FILE_NOT_FOUND even though .NET offset checks pass.
+    foreach ($missing in @('MUI_Dlt','MUI_Std')) {
+        $nativeId='BcPatchNativeTest-' + [Guid]::NewGuid().ToString('N')
+        $nativePath='SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones\' + $nativeId
+        New-BcDefinition $sandbox $nativePath
+        $key=$sandbox.OpenSubKey($nativePath,$true)
+        try {
+            $key.DeleteValue($missing)
+            if (-not (Test-BcRules $key) -or (Test-BcDefinition $key)) {throw 'Incomplete names were not distinguished from valid rules.'}
+        } finally {$key.Dispose()}
+        $failed=$false
+        try {Test-BcNativeTimeZone $nativeId | Out-Null} catch {
+            $cause=$_.Exception.GetBaseException()
+            if ($cause -isnot [ComponentModel.Win32Exception] -or $cause.NativeErrorCode -ne 2) {throw}
+            $failed=$true
+        }
+        if (-not $failed) {throw "Missing $missing did not reproduce the native API failure."}
+        $key=$sandbox.OpenSubKey($nativePath,$true)
+        try {$key.SetValue($missing,[string]$definition.Values.$missing,[Microsoft.Win32.RegistryValueKind]::String)} finally {$key.Dispose()}
+        Test-BcNativeTimeZone $nativeId | Out-Null
+        $checks+=6
+    }
+    Test-BcNativeTimeZone | Out-Null
+    $checks+=4
     Test-BcOffsets
     $checks+=12
     $zone=[TimeZoneInfo]::FindSystemTimeZoneById('British Columbia Standard Time')
@@ -179,6 +205,104 @@ try {
     $key=$sandbox.OpenSubKey($zonePath)
     if ($key) {$key.Dispose(); throw 'Failure recovery left a partial BC definition.'}
     $checks+=3
+    $script:FailSelection=$false
+    # Upgrade a matching old definition without replacing any rule bytes or
+    # changing selection, including when BC is already selected.
+    New-BcDefinition $sandbox $zonePath
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {
+        foreach ($name in @('MUI_Display','MUI_Dlt','MUI_Std')) {$key.DeleteValue($name)}
+        $oldFingerprint=Get-BcFingerprint $key
+    } finally {$key.Dispose()}
+    Set-BcSelection 'British Columbia Standard Time' $false
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly -WhatIf
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ((Get-BcFingerprint $key) -ne $oldFingerprint) {throw 'WhatIf repaired metadata.'}} finally {$key.Dispose()}
+    $failed=$false
+    try {Invoke-BcPatch -Root $sandbox -Mode Verify | Out-Null} catch {$failed=$true}
+    if (-not $failed) {throw 'Verify accepted missing name metadata.'}
+    $checks+=2
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    $repairBackup=$script:LastBackup
+    $repairState=Get-Content -LiteralPath $repairBackup -Raw | ConvertFrom-Json
+    if ($repairState.CreatedZone -or $repairState.SelectionChanged -or @($repairState.AddedNameValues).Count -ne 3) {throw 'Metadata repair backup is incorrect.'}
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if (-not (Test-BcDefinition $key)) {throw 'Apply failed to repair missing names.'}} finally {$key.Dispose()}
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    if ($script:LastBackup -ne $repairBackup) {throw 'Repeated metadata repair created a new backup.'}
+    Invoke-BcPatch -Root $sandbox -Mode Rollback -BackupPath $repairBackup | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ((Get-BcFingerprint $key) -ne $oldFingerprint) {throw 'Metadata rollback did not restore the exact original definition.'}} finally {$key.Dispose()}
+    $checks+=4
+    # A failed post-write validation removes only the names just added.
+    $script:OriginalNativeCheck=(Get-Command Test-BcNativeTimeZone).ScriptBlock
+    function Test-BcNativeTimeZone {throw 'Injected native API validation failure.'}
+    try {
+        $failed=$false
+        try {Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null} catch {if ($_ -notmatch 'Injected native API validation failure') {throw}; $failed=$true}
+        if (-not $failed) {throw 'Native API validation failure was ignored.'}
+    } finally {Set-Item -LiteralPath Function:\Test-BcNativeTimeZone -Value $script:OriginalNativeCheck}
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ((Get-BcFingerprint $key) -ne $oldFingerprint) {throw 'Failed repair changed the original definition.'}} finally {$key.Dispose()}
+    $checks+=2
+    # Preserve a later update to an entry repaired by this patch.
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {$key.SetValue('Display','Later official update')} finally {$key.Dispose()}
+    Invoke-BcPatch -Root $sandbox -Mode Rollback -BackupPath $script:LastBackup -WarningAction SilentlyContinue | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if (-not (Test-BcDefinition $key) -or $key.GetValue('Display') -ne 'Later official update') {throw 'Rollback modified a later update after metadata repair.'}} finally {$key.Dispose()}
+    $sandbox.DeleteSubKeyTree($zonePath)
+    $checks++
+    # Older backup files remain usable by the updated rollback implementation.
+    Set-BcSelection $initial.Id $initial.DstDisabled
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    $saved=Get-Content -LiteralPath $script:LastBackup -Raw | ConvertFrom-Json
+    $saved.Format='TRG.BcTimeZonePatch.v1'
+    $saved.PSObject.Properties.Remove('AddedNameValues')
+    $saved | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:LastBackup -Encoding UTF8
+    Invoke-BcPatch -Root $sandbox -Mode Rollback -BackupPath $script:LastBackup | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath)
+    if ($key) {$key.Dispose();throw 'Legacy backup rollback failed.'}
+    $checks++
+    # Repair never replaces existing labels or malformed values, and refuses
+    # different rule data even if that definition also lacks name metadata.
+    New-BcDefinition $sandbox $zonePath
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {
+        $key.DeleteValue('MUI_Dlt'); $key.DeleteValue('MUI_Display')
+        $key.SetValue('MUI_Std',42,[Microsoft.Win32.RegistryValueKind]::DWord)
+        $malformedFingerprint=Get-BcFingerprint $key
+    } finally {$key.Dispose()}
+    $failed=$false
+    try {Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null} catch {$failed=$true}
+    if (-not $failed) {throw 'Malformed existing metadata was accepted.'}
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {
+        if ((Get-BcFingerprint $key) -ne $malformedFingerprint) {throw 'Malformed metadata refusal changed the definition.'}
+        $key.SetValue('MUI_Std','Existing standard label',[Microsoft.Win32.RegistryValueKind]::String)
+        $partialFingerprint=Get-BcFingerprint $key
+    } finally {$key.Dispose()}
+    $checks+=2
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ($key.GetValue('MUI_Std') -ne 'Existing standard label') {throw 'Repair replaced an existing label.'}} finally {$key.Dispose()}
+    Invoke-BcPatch -Root $sandbox -Mode Rollback -BackupPath $script:LastBackup | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {
+        if ((Get-BcFingerprint $key) -ne $partialFingerprint) {throw 'Partial repair rollback changed a pre-existing value.'}
+        $badTzi=ConvertFrom-BcHex $definition.Values.TZI
+        $badTzi[0]=$badTzi[0] -bxor 1
+        $key.SetValue('TZI',$badTzi,[Microsoft.Win32.RegistryValueKind]::Binary)
+        $differentFingerprint=Get-BcFingerprint $key
+    } finally {$key.Dispose()}
+    $checks+=2
+    $failed=$false
+    try {Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null} catch {$failed=$true}
+    if (-not $failed) {throw 'Metadata repair accepted different rules.'}
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ((Get-BcFingerprint $key) -ne $differentFingerprint) {throw 'Refusing different rules changed the definition.'}} finally {$key.Dispose()}
+    $checks+=2
 } finally {
     if ($overridden) {[BcTestRegistry]::Override([IntPtr]::Zero)}
     [TimeZoneInfo]::ClearCachedData()

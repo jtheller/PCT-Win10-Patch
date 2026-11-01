@@ -42,8 +42,8 @@ If you already use PowerShell 7, replace `powershell.exe` with `pwsh.exe`. On 64
 - Adds the Windows time-zone ID **`British Columbia Standard Time`**, with historical seasonal rules and permanent UTC−7 going forward.
 - Selects the new zone on Apply, unless `-RegisterOnly` is specified.
 - Saves the original selected zone and its daylight-saving setting before making changes.
-- Refuses to overwrite an existing BC definition with different rules. An existing definition with matching rules is reused.
-- Checks the historical, transition and future offsets before selecting BC; attempts recovery if applying fails.
+- Refuses to overwrite an existing BC definition with different rules. For matching rules, adds missing English `MUI_Display`, `MUI_Dlt` and `MUI_Std` name values without replacing existing labels or rule bytes.
+- Checks historical, transition and future offsets and the native Windows time-zone API before selecting BC; attempts recovery if applying fails.
 
 The script uses the normal Windows `tzutil` command to select the zone. It preserves the US Pacific definition, leaves system DLLs and ESU licensing intact, and does not set the UTC clock or mark the cumulative update as installed.
 
@@ -57,7 +57,20 @@ The following examples assume you opened PowerShell in the script's folder. Appl
 | Preview the Apply operation without changes | `.\Patch-BcTimeZone.ps1 -Mode Apply -WhatIf` |
 | Add and select BC | `.\Patch-BcTimeZone.ps1 -Mode Apply` |
 | Add BC without selecting it | `.\Patch-BcTimeZone.ps1 -Mode Apply -RegisterOnly` |
-| Verify installed rules and offsets | `.\Patch-BcTimeZone.ps1 -Mode Verify` |
+| Verify installed rules, names and native API compatibility | `.\Patch-BcTimeZone.ps1 -Mode Verify` |
+
+### Upgrading an earlier version
+
+Earlier versions omitted `MUI_Std` and `MUI_Dlt`. These names are required by the native Windows time-zone API even when .NET offset calculations succeed. With BC selected, the omission can cause Windows date/calendar initialization to fail with `0x80070002` (file not found), crashing apps such as Phone Link, Windows Security and screen clipping.
+
+Download the updated script from the fixed release once available, then repair a matching older definition without changing the selected zone:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Patch-BcTimeZone.ps1 -Mode Apply -RegisterOnly
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Patch-BcTimeZone.ps1 -Mode Verify
+```
+
+Apply backs up the repair, fills only missing names, and validates the result. Restart affected apps afterward. Existing name values and all time-zone rules are preserved; definitions with different rules or malformed existing names are rejected for inspection.
 
 ## Rollback
 
@@ -75,7 +88,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Patch-BcTimeZone.ps1 -
 
 Replace `YOUR-BACKUP-FOLDER` with your actual backup folder. Add `-WhatIf` to preview the rollback first.
 
-Rollback restores the original selected zone and its disabled-DST flag. It removes the BC definition only if this patch created it and the complete definition is unchanged. A definition subsequently modified by Windows Update or another tool is preserved. Existing definitions reused during Apply are also preserved. Backups remain available after rollback, and their directories grant access to the applying account, Administrators and SYSTEM.
+Rollback restores the original selected zone and its disabled-DST flag. It removes the BC definition only if this patch created it and the complete definition is unchanged. For a repair of an existing definition, it removes only the name values that Apply added, restoring the previous metadata. This also restores the earlier missing-name defect if that was the original state. A definition subsequently modified by Windows Update or another tool is preserved. Existing rules and pre-existing labels are preserved. The updated script accepts both its version 2 backups and older version 1 backups. Backups remain available after rollback, and their directories grant access to the applying account, Administrators and SYSTEM.
 
 ## Compatibility and testing
 
@@ -86,12 +99,12 @@ Rollback restores the original selected zone and its disabled-DST flag. It remov
 | x64 | Tested on Windows 10 22H2 |
 | x86 and ARM64 | Registry data is architecture-independent and native registry views are handled; physical systems have not been tested |
 | Windows PowerShell 5.1 | Tested |
-| PowerShell 7 | Tested with 7.6.9 |
+| PowerShell 7 | Tested with 7.6.5 |
 | Windows 11 and Windows Server | Apply is blocked; use their supported update path |
 
 The script requires **PowerShell 5.1 or later**. Older Windows 10 releases may need a compatible newer PowerShell installed first.
 
-The isolated suite passes **1,563 checks per runtime**, including exact comparison with the extracted Microsoft registry values, monthly historical offsets for 2006–2025, every day in 2026, the final spring-forward boundary, the absence of a November 2026 rollback, and monthly UTC−7 offsets through 2100. It also tests version guards, Apply, Verify, repeated Apply, RegisterOnly, backup access controls, Rollback, preservation of later changes, and recovery from a simulated selection failure.
+The isolated suite passes **1,598 checks per runtime**, including exact comparison with the extracted Microsoft rule bytes, monthly historical offsets for 2006–2025, every day in 2026, the final spring-forward boundary, the absence of a November 2026 rollback, and monthly UTC−7 offsets through 2100. It reproduces native `GetTimeZoneInformationForYear` error 2 when either required name is absent and verifies recovery when it is restored, using unique fixture IDs to avoid the native API's cache. It also tests version guards, Apply, Verify, repeated Apply, RegisterOnly, backup access controls, metadata repair and rollback, older backups, preservation of existing labels and later changes, rejection of malformed metadata/different rules, and recovery from simulated selection and native-validation failures.
 
 Tests use a temporary HKCU registry tree with a process-local registry redirect. The elevation check and native zone selection are substituted in the orchestration fixture. Tests verify that the live selected zone and machine time-zone definitions remain unchanged. GitHub Actions runs the suite in Windows PowerShell and PowerShell 7; these runner tests do not represent physical testing on every Windows 10 release or CPU architecture.
 
@@ -100,6 +113,8 @@ Tests use a temporary HKCU registry tree with a process-local registry redirect.
 **The time zone changes back automatically.** Turn off **Set time zone automatically** in Windows Date & time settings, then select **(UTC-07:00) Pacific Time (British Columbia)**. This patch does not update Windows' geographic auto-selection data or change that setting for you.
 
 **Windows already lists the correct BC zone.** Run Verify first. An official update may already have added it, so applying this patch may be unnecessary.
+
+**Phone Link, Windows Security or Win+Shift+S crashes after installing an earlier patch.** See [Upgrading an earlier version](#upgrading-an-earlier-version). The native Windows date/time API needs the `MUI_Std` and `MUI_Dlt` registry names; the earlier patch supplied only `Std` and `Dlt`. No graphics-driver rollback or app-data reset is needed to repair this metadata defect.
 
 **Windows time is correct, but Outlook or a browser still shows the wrong time.** Applications can maintain separate calendar settings or time-zone databases. Update the affected application, review its time-zone setting, and check future recurring meetings. This script does not migrate Outlook calendar events or update bundled IANA/ICU mappings. [Microsoft product guidance](https://support.microsoft.com/en-us/servicing/os/windows/docs/2026/10/canada-2026-time-zone-changes)
 
@@ -115,7 +130,7 @@ For an issue report, include your Windows edition/build, PowerShell version, and
 
 The source was a staged Microsoft Windows component associated with signed **KB5126657**, package **19041.7807.1.49**. The time-zone component version is **Microsoft-Windows-International-TimeZones 10.0.19041.7802**.
 
-`TZI` and all `Dynamic DST` bytes are copied exactly from the BC entries in Microsoft's component manifest. The `MUI_Display`, `MUI_Dlt` and `MUI_Std` resource references were replaced with their resolved English `Display`, `Dlt` and `Std` strings, allowing the patch to work without installing a newer tzres.dll. Labels therefore appear in English on non-English installations.
+`TZI` and all `Dynamic DST` bytes are copied exactly from the BC entries in Microsoft's component manifest. The `MUI_Display`, `MUI_Dlt` and `MUI_Std` value names are retained, with their resource references replaced by resolved English strings. The legacy `Display`, `Dlt` and `Std` values contain the same English labels. Keeping both sets allows native Windows APIs and .NET callers to work without installing a newer tzres.dll. Labels therefore appear in English on non-English installations.
 
 - [Extracted BC registry entries](source/bc-registry-excerpt.xml)
 - [Readable embedded definition](source/bc-definition.json)

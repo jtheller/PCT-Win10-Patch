@@ -37,6 +37,9 @@ $script:Definition = @'
                    "Display":  "(UTC-07:00) Pacific Time (British Columbia)",
                    "Dlt":  "British Columbia Daylight Time",
                    "Std":  "British Columbia Standard Time",
+                   "MUI_Display":  "(UTC-07:00) Pacific Time (British Columbia)",
+                   "MUI_Dlt":  "British Columbia Daylight Time",
+                   "MUI_Std":  "British Columbia Standard Time",
                    "TZI":  "A401000000000000C4FFFFFF0000000000000000000000000000000000000000000000000000000000000000"
                },
     "Dynamic":  {
@@ -113,7 +116,7 @@ function Get-BcFingerprint([Microsoft.Win32.RegistryKey]$Key) {
     finally { $sha.Dispose() }
 }
 
-function Test-BcDefinition([Microsoft.Win32.RegistryKey]$Key) {
+function Test-BcRules([Microsoft.Win32.RegistryKey]$Key) {
     if ($null -eq $Key) { return $false }
     if ('TZI' -notin $Key.GetValueNames()) { return $false }
     if ($Key.GetValueKind('TZI') -ne [Microsoft.Win32.RegistryValueKind]::Binary) { return $false }
@@ -132,6 +135,85 @@ function Test-BcDefinition([Microsoft.Win32.RegistryKey]$Key) {
         }
         return $true
     } finally { $dynamic.Dispose() }
+}
+
+function Get-BcMissingNames([Microsoft.Win32.RegistryKey]$Key) {
+    foreach ($name in @('MUI_Display','MUI_Dlt','MUI_Std')) {
+        if ($name -notin $Key.GetValueNames()) { $name }
+    }
+}
+
+function Test-BcDefinition([Microsoft.Win32.RegistryKey]$Key) {
+    if (-not (Test-BcRules $Key)) { return $false }
+    foreach ($name in @('MUI_Display','MUI_Dlt','MUI_Std')) {
+        if ($name -notin $Key.GetValueNames()) { return $false }
+        if ($Key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::String -or
+            [string]::IsNullOrWhiteSpace([string]$Key.GetValue($name))) { return $false }
+    }
+    return $true
+}
+
+function Remove-BcAddedNames([Microsoft.Win32.RegistryKey]$Root, [object[]]$Added) {
+    $key = $Root.OpenSubKey($script:ZonePath,$true)
+    if ($null -eq $key) { return }
+    try {
+        foreach ($entry in $Added) {
+            # Do not remove values that another tool changed after this write.
+            if ($entry.Name -in $key.GetValueNames() -and
+                $key.GetValueKind($entry.Name) -eq [Microsoft.Win32.RegistryValueKind]::String -and
+                $key.GetValue($entry.Name) -eq $entry.Value) { $key.DeleteValue($entry.Name) }
+        }
+    } finally { $key.Dispose() }
+}
+
+function Initialize-BcNativeApi {
+    if ('BcTimeZonePatch.NativeApi' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+namespace BcTimeZonePatch {
+    public static class NativeApi {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SystemTime { public ushort Year, Month, DayOfWeek, Day, Hour, Minute, Second, Milliseconds; }
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+        public struct Zone {
+            public int Bias;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string StandardName;
+            public SystemTime StandardDate; public int StandardBias;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string DaylightName;
+            public SystemTime DaylightDate; public int DaylightBias;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+        public struct DynamicZone {
+            public int Bias;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string StandardName;
+            public SystemTime StandardDate; public int StandardBias;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)] public string DaylightName;
+            public SystemTime DaylightDate; public int DaylightBias;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string TimeZoneKeyName;
+            [MarshalAs(UnmanagedType.U1)] public bool DynamicDaylightTimeDisabled;
+        }
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTimeZoneInformationForYear(ushort year, ref DynamicZone zone, out Zone result);
+        public static void Check(string id, ushort year) {
+            DynamicZone zone = new DynamicZone(); zone.TimeZoneKeyName = id;
+            Zone result;
+            if (!GetTimeZoneInformationForYear(year, ref zone, out result)) {
+                int error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(error, "GetTimeZoneInformationForYear failed for " + id + " (" + year + "): " + new Win32Exception(error).Message);
+            }
+        }
+    }
+}
+'@
+}
+
+function Test-BcNativeTimeZone([string]$Id = $script:ZoneId) {
+    Initialize-BcNativeApi
+    foreach ($year in @(2006,2026,2027,2030)) { [BcTimeZonePatch.NativeApi]::Check($Id,[uint16]$year) }
+    Write-Output 'PASS: 4 native Windows time-zone API checks.'
 }
 
 function New-BcDefinition([Microsoft.Win32.RegistryKey]$Root, [string]$Path) {
@@ -233,8 +315,8 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
     if ($Mode -eq 'Rollback') {
         if (-not $BackupPath) { throw 'Rollback requires -BackupPath pointing to the state.json printed by Apply.' }
         $state = Get-Content -LiteralPath $BackupPath -Raw | ConvertFrom-Json
-        if ($state.Format -ne 'TRG.BcTimeZonePatch.v1' -or $state.ZoneId -ne $script:ZoneId) { throw 'This is not a BC patch backup.' }
-        if (-not $PSCmdlet.ShouldProcess($script:ZoneId,'Restore the original time-zone selection and remove only an unchanged definition created by this patch')) { return }
+        if ($state.Format -notin @('TRG.BcTimeZonePatch.v1','TRG.BcTimeZonePatch.v2') -or $state.ZoneId -ne $script:ZoneId) { throw 'This is not a BC patch backup.' }
+        if (-not $PSCmdlet.ShouldProcess($script:ZoneId,'Restore the original selection and undo unchanged definition or name-metadata additions made by this patch')) { return }
         Assert-BcAdministrator
         if ($state.SelectionChanged) { Set-BcSelection $state.Original.Id ([bool]$state.Original.DstDisabled) }
         if ($state.CreatedZone) {
@@ -247,6 +329,13 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
                     $root.DeleteSubKeyTree($script:ZonePath)
                 } else { Write-Warning 'BC definition changed since Apply (possibly by Windows Update); it was preserved.' }
             }
+        } elseif ($state.Format -eq 'TRG.BcTimeZonePatch.v2' -and @($state.AddedNameValues).Count -gt 0) {
+            $key = $root.OpenSubKey($script:ZonePath)
+            if ($null -ne $key) {
+                try { $unchanged = (Get-BcFingerprint $key) -eq $state.InstalledFingerprint } finally { $key.Dispose() }
+                if ($unchanged) { Remove-BcAddedNames $root @($state.AddedNameValues) }
+                else { Write-Warning 'BC definition changed since Apply; its name metadata was preserved.' }
+            }
         }
         [TimeZoneInfo]::ClearCachedData()
         Write-Output 'Rollback complete. The backup is retained.'
@@ -255,12 +344,19 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
     $key = $root.OpenSubKey($script:ZonePath)
     $exists = $null -ne $key
     $matches = $false
+    $rulesMatch = $false
+    $missingNames = @()
     if ($exists) {
-        try { $matches = Test-BcDefinition $key } finally { $key.Dispose() }
+        try {
+            $rulesMatch = Test-BcRules $key
+            $matches = Test-BcDefinition $key
+            $missingNames = @(Get-BcMissingNames $key)
+        } finally { $key.Dispose() }
     }
     if ($Mode -eq 'Verify') {
-        if (-not $matches) { throw 'BC definition is missing or differs from the extracted Microsoft rules.' }
+        if (-not $matches) { throw 'BC definition is missing, differs from the extracted rules, or lacks required MUI name metadata. Run Preview for details.' }
         Test-BcOffsets
+        Test-BcNativeTimeZone
         $current = Get-BcCurrentSelection
         Write-Output "Selected zone: $($current.Id); DST disabled: $($current.DstDisabled)."
         if ($current.Id -ne $script:ZoneId -or $current.DstDisabled) { Write-Warning 'The BC definition exists, but is not selected with its rules enabled.' }
@@ -269,18 +365,30 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
     $original = Get-BcCurrentSelection
     if ($Mode -eq 'Preview') {
         Write-Output "Current: $($original.Id); DST disabled: $($original.DstDisabled); displayed time: $([DateTimeOffset]::Now.ToString('o'))"
-        Write-Output "BC definition exists: $exists; matches extracted rules: $matches."
-        Write-Output 'Apply: back up the selection; add BC if absent; select BC (or use -RegisterOnly).'
+        Write-Output "BC definition exists: $exists; matches extracted rules: $rulesMatch; names and rules valid: $matches."
+        if ($missingNames.Count -gt 0) { Write-Output "Missing name metadata: $($missingNames -join ', ')." }
+        Write-Output 'Apply: back up; add BC if absent or repair missing names on matching rules; select BC (or use -RegisterOnly).'
         Write-Output 'Scope: BC registry definition and selected zone only. US Pacific rules and system DLLs stay intact.'
         return
     }
     Assert-BcWindows10 $root
-    if ($exists -and -not $matches) { throw 'An existing BC definition differs. Refusing to overwrite it.' }
-    if (-not $PSCmdlet.ShouldProcess($script:ZoneId,'Back up, register Microsoft BC rules if absent, and select BC unless -RegisterOnly')) { return }
+    if ($exists -and -not $rulesMatch) { throw 'An existing BC definition differs. Refusing to overwrite it.' }
+    if ($exists) {
+        # Missing values may be repaired, but malformed existing ones are never overwritten.
+        $key = $root.OpenSubKey($script:ZonePath)
+        try {
+            foreach ($name in @('MUI_Display','MUI_Dlt','MUI_Std')) {
+                if ($name -in $key.GetValueNames() -and
+                    ($key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::String -or
+                    [string]::IsNullOrWhiteSpace([string]$key.GetValue($name)))) { throw "Existing $name is invalid; refusing to overwrite it." }
+            }
+        } finally { $key.Dispose() }
+    }
+    if (-not $PSCmdlet.ShouldProcess($script:ZoneId,'Back up, register BC or repair missing name metadata on matching rules, and select BC unless -RegisterOnly')) { return }
     Assert-BcAdministrator
     $changeSelection = -not $RegisterOnly -and ($original.Id -ne $script:ZoneId -or $original.DstDisabled)
-    if ($exists -and -not $changeSelection) { Test-BcOffsets; Write-Output 'Already configured; no changes.'; return }
-    $state = [pscustomobject]@{ Format='TRG.BcTimeZonePatch.v1'; ZoneId=$script:ZoneId; CreatedUtc=[DateTime]::UtcNow.ToString('o'); Original=$original; CreatedZone=(-not $exists); SelectionChanged=$changeSelection; InstalledFingerprint=$null }
+    if ($matches -and -not $changeSelection) { Test-BcOffsets; Test-BcNativeTimeZone; Write-Output 'Already configured; no changes.'; return }
+    $state = [pscustomobject]@{ Format='TRG.BcTimeZonePatch.v2'; ZoneId=$script:ZoneId; CreatedUtc=[DateTime]::UtcNow.ToString('o'); Original=$original; CreatedZone=(-not $exists); SelectionChanged=$changeSelection; InstalledFingerprint=$null; AddedNameValues=@() }
     $savedBackup = New-BcBackup $state
     Write-Output "Backup: $savedBackup"
     $created = $false
@@ -289,11 +397,23 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
         if (-not $exists) {
             New-BcDefinition $root $script:ZonePath
             $created = $true
-            $key = $root.OpenSubKey($script:ZonePath)
-            try { $state.InstalledFingerprint = Get-BcFingerprint $key } finally { $key.Dispose() }
-            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $savedBackup -Encoding UTF8
+        } elseif ($missingNames.Count -gt 0) {
+            $key = $root.OpenSubKey($script:ZonePath,$true)
+            try {
+                if (-not (Test-BcRules $key)) { throw 'BC rules changed before the metadata repair; rerun Preview.' }
+                foreach ($name in $missingNames) {
+                    if ($name -in $key.GetValueNames()) { throw "$name appeared before the metadata repair; refusing to overwrite it." }
+                    $value = [string]$script:Definition.Values.$name
+                    $state.AddedNameValues += [pscustomobject]@{Name=$name;Value=$value}
+                    $key.SetValue($name,$value,[Microsoft.Win32.RegistryValueKind]::String)
+                }
+            } finally { $key.Dispose() }
         }
+        $key = $root.OpenSubKey($script:ZonePath)
+        try { $state.InstalledFingerprint = Get-BcFingerprint $key } finally { $key.Dispose() }
+        $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $savedBackup -Encoding UTF8
         Test-BcOffsets
+        Test-BcNativeTimeZone
         if ($changeSelection) { $selectionAttempted = $true; Set-BcSelection $script:ZoneId }
         Write-Output "Apply complete. Current displayed time: $([DateTimeOffset]::Now.ToString('o'))"
         Write-Output 'Restart open applications so they reload time-zone data. Review Outlook calendar settings separately.'
@@ -304,7 +424,7 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
             if ($created) {
                 if ((Get-BcCurrentSelection).Id -eq $script:ZoneId) { throw 'BC is still selected; keeping its definition.' }
                 $root.DeleteSubKeyTree($script:ZonePath,$false)
-            }
+            } elseif ($state.AddedNameValues.Count -gt 0) { Remove-BcAddedNames $root @($state.AddedNameValues) }
         } catch { Write-Warning "Automatic recovery could not finish: $_. Backup: $savedBackup" }
         throw $failure
     }
