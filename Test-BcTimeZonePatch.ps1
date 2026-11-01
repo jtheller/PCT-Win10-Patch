@@ -265,6 +265,57 @@ try {
     $key=$sandbox.OpenSubKey($zonePath)
     if ($key) {$key.Dispose();throw 'Legacy backup rollback failed.'}
     $checks++
+    # The earlier 2026 root TZI is equivalent with the same Dynamic DST table.
+    # Repair its names in place, leaving the original root/rule bytes intact.
+    New-BcDefinition $sandbox $zonePath
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {
+        $key.SetValue('TZI',(ConvertFrom-BcHex $definition.Dynamic.'2026'),[Microsoft.Win32.RegistryValueKind]::Binary)
+        foreach ($name in @('MUI_Display','MUI_Dlt','MUI_Std')) {$key.DeleteValue($name)}
+        if (-not (Test-BcRules $key) -or (Test-BcDefinition $key)) {throw 'The older root layout was not recognized with missing names.'}
+        $legacyFingerprint=Get-BcFingerprint $key
+        $dynamic=$key.OpenSubKey('Dynamic DST')
+        try {$legacyDynamicFingerprint=Get-BcFingerprint $dynamic} finally {$dynamic.Dispose()}
+    } finally {$key.Dispose()}
+    Test-BcOffsets | Out-Null
+    Test-BcNativeTimeZone | Out-Null
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    $legacyRepairBackup=$script:LastBackup
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {
+        if (-not (Test-BcDefinition $key)) {throw 'Legacy layout name repair failed.'}
+        if ([BitConverter]::ToString($key.GetValue('TZI')).Replace('-','') -ne $definition.Dynamic.'2026') {throw 'Repair replaced the legacy root TZI.'}
+        $dynamic=$key.OpenSubKey('Dynamic DST')
+        try {if ((Get-BcFingerprint $dynamic) -ne $legacyDynamicFingerprint) {throw 'Repair changed legacy Dynamic DST data.'}} finally {$dynamic.Dispose()}
+    } finally {$key.Dispose()}
+    Invoke-BcPatch -Root $sandbox -Mode Verify -WarningAction SilentlyContinue | Out-Null
+    Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null
+    if ($script:LastBackup -ne $legacyRepairBackup) {throw 'Repeated legacy repair created another backup.'}
+    Invoke-BcPatch -Root $sandbox -Mode Rollback -BackupPath $legacyRepairBackup | Out-Null
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ((Get-BcFingerprint $key) -ne $legacyFingerprint) {throw 'Legacy repair rollback changed the original rules or names.'}} finally {$key.Dispose()}
+    $sandbox.DeleteSubKeyTree($zonePath)
+    $checks+=22
+    # A legacy root must not allow a changed historical/year-specific rule.
+    New-BcDefinition $sandbox $zonePath
+    $key=$sandbox.OpenSubKey($zonePath,$true)
+    try {
+        $key.SetValue('TZI',(ConvertFrom-BcHex $definition.Dynamic.'2026'),[Microsoft.Win32.RegistryValueKind]::Binary)
+        $dynamic=$key.OpenSubKey('Dynamic DST',$true)
+        try {
+            $different=ConvertFrom-BcHex $definition.Dynamic.'2027'; $different[0]=$different[0] -bxor 1
+            $dynamic.SetValue('2027',$different,[Microsoft.Win32.RegistryValueKind]::Binary)
+        } finally {$dynamic.Dispose()}
+        if (Test-BcRules $key) {throw 'Legacy layout with changed year-specific rules was accepted.'}
+        $differentLegacyFingerprint=Get-BcFingerprint $key
+    } finally {$key.Dispose()}
+    $failed=$false
+    try {Invoke-BcPatch -Root $sandbox -Mode Apply -RegisterOnly | Out-Null} catch {$failed=$true}
+    if (-not $failed) {throw 'Apply accepted changed Dynamic DST rules with a legacy root.'}
+    $key=$sandbox.OpenSubKey($zonePath)
+    try {if ((Get-BcFingerprint $key) -ne $differentLegacyFingerprint) {throw 'Refused legacy layout was modified.'}} finally {$key.Dispose()}
+    $sandbox.DeleteSubKeyTree($zonePath)
+    $checks+=3
     # Repair never replaces existing labels or malformed values, and refuses
     # different rule data even if that definition also lacks name metadata.
     New-BcDefinition $sandbox $zonePath

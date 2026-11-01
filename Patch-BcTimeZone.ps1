@@ -120,7 +120,11 @@ function Test-BcRules([Microsoft.Win32.RegistryKey]$Key) {
     if ($null -eq $Key) { return $false }
     if ('TZI' -notin $Key.GetValueNames()) { return $false }
     if ($Key.GetValueKind('TZI') -ne [Microsoft.Win32.RegistryValueKind]::Binary) { return $false }
-    if ([BitConverter]::ToString($Key.GetValue('TZI')).Replace('-','') -ne $script:Definition.Values.TZI) { return $false }
+    # Earlier BC registrations used the 2026 transitional rule at the root.
+    # It is compatible only when every Dynamic DST value below still matches;
+    # those year-specific rules supply the historical and permanent offsets.
+    $rootTzi = [BitConverter]::ToString($Key.GetValue('TZI')).Replace('-','')
+    if ($rootTzi -notin @($script:Definition.Values.TZI,$script:Definition.Dynamic.'2026')) { return $false }
     $dynamic = $Key.OpenSubKey('Dynamic DST')
     if ($null -eq $dynamic) { return $false }
     try {
@@ -365,7 +369,7 @@ if ($BackupPath -and $Mode -ne 'Rollback') { throw '-BackupPath is for Rollback 
     $original = Get-BcCurrentSelection
     if ($Mode -eq 'Preview') {
         Write-Output "Current: $($original.Id); DST disabled: $($original.DstDisabled); displayed time: $([DateTimeOffset]::Now.ToString('o'))"
-        Write-Output "BC definition exists: $exists; matches extracted rules: $rulesMatch; names and rules valid: $matches."
+        Write-Output "BC definition exists: $exists; compatible BC rules: $rulesMatch; names and rules valid: $matches."
         if ($missingNames.Count -gt 0) { Write-Output "Missing name metadata: $($missingNames -join ', ')." }
         Write-Output 'Apply: back up; add BC if absent or repair missing names on matching rules; select BC (or use -RegisterOnly).'
         Write-Output 'Scope: BC registry definition and selected zone only. US Pacific rules and system DLLs stay intact.'
