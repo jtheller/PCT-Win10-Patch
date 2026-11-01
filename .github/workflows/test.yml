@@ -10,16 +10,16 @@ permissions:
 
 jobs:
   isolated-registry-tests:
-    name: Windows / ${{ matrix.shell }}
+    name: Windows / ${{ matrix.runtime }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
-        shell: [powershell, pwsh]
+        runtime: [powershell, pwsh]
     steps:
       - uses: actions/checkout@v4
       - name: Parse PowerShell sources
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($path in @('Patch-BcTimeZone.ps1','Test-BcTimeZonePatch.ps1')) {
@@ -29,12 +29,14 @@ jobs:
             if ($errors.Count) { throw ($errors | Out-String) }
           }
       - name: Run isolated registry tests
-        shell: ${{ matrix.shell }}
-        run: .\Test-BcTimeZonePatch.ps1
+        shell: pwsh
+        run: |
+          & '${{ matrix.runtime }}' -NoProfile -ExecutionPolicy Bypass -File .\Test-BcTimeZonePatch.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ matrix.shell }}
+          name: results-${{ matrix.runtime }}
           path: test-results.json
           if-no-files-found: ignore
